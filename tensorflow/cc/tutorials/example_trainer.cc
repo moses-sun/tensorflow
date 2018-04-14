@@ -24,6 +24,7 @@ limitations under the License.
 #include "tensorflow/core/graph/default_device.h"
 #include "tensorflow/core/graph/graph_def_builder.h"
 #include "tensorflow/core/lib/core/threadpool.h"
+#include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/lib/strings/stringprintf.h"
 #include "tensorflow/core/platform/init_main.h"
 #include "tensorflow/core/platform/logging.h"
@@ -37,7 +38,7 @@ namespace tensorflow {
 namespace example {
 
 struct Options {
-  int num_concurrent_sessions = 10;  // The number of concurrent sessions
+  int num_concurrent_sessions = 1;   // The number of concurrent sessions
   int num_concurrent_steps = 10;     // The number of concurrent steps
   int num_iterations = 100;          // Each step repeats this many times
   bool use_gpu = false;              // Whether to use gpu in the training
@@ -52,19 +53,22 @@ GraphDef CreateGraphDef() {
   Scope root = Scope::NewRootScope();
   using namespace ::tensorflow::ops;  // NOLINT(build/namespaces)
 
-  // a = [3 2; -1 0]
-  auto a = Const(root, {{3.f, 2.f}, {-1.f, 0.f}});
+  // A = [3 2; -1 0].  Using Const<float> means the result will be a
+  // float tensor even though the initializer has integers.
+  auto a = Const<float>(root, {{3, 2}, {-1, 0}});
 
   // x = [1.0; 1.0]
   auto x = Const(root.WithOpName("x"), {{1.f}, {1.f}});
 
-  // y = a * x
+  // y = A * x
   auto y = MatMul(root.WithOpName("y"), a, x);
 
   // y2 = y.^2
   auto y2 = Square(root, y);
 
-  // y2_sum = sum(y2)
+  // y2_sum = sum(y2).  Note that you can pass constants directly as
+  // inputs.  Sum() will automatically create a Const node to hold the
+  // 0 value.
   auto y2_sum = Sum(root, y2, 0);
 
   // y_norm = sqrt(y2_sum)
@@ -98,17 +102,18 @@ void ConcurrentSteps(const Options* opts, int session_index) {
   std::unique_ptr<Session> session(NewSession(options));
   GraphDef def = CreateGraphDef();
   if (options.target.empty()) {
-    graph::SetDefaultDevice(opts->use_gpu ? "/gpu:0" : "/cpu:0", &def);
+    graph::SetDefaultDevice(opts->use_gpu ? "/device:GPU:0" : "/cpu:0", &def);
   }
 
   TF_CHECK_OK(session->Create(def));
 
   // Spawn M threads for M concurrent steps.
   const int M = opts->num_concurrent_steps;
-  thread::ThreadPool step_threads(Env::Default(), "trainer", M);
+  std::unique_ptr<thread::ThreadPool> step_threads(
+      new thread::ThreadPool(Env::Default(), "trainer", M));
 
   for (int step = 0; step < M; ++step) {
-    step_threads.Schedule([&session, opts, session_index, step]() {
+    step_threads->Schedule([&session, opts, session_index, step]() {
       // Randomly initialize the input.
       Tensor x(DT_FLOAT, TensorShape({2, 1}));
       auto x_flat = x.flat<float>();
@@ -136,12 +141,19 @@ void ConcurrentSteps(const Options* opts, int session_index) {
     });
   }
 
+  // Delete the threadpool, thus waiting for all threads to complete.
+  step_threads.reset(nullptr);
   TF_CHECK_OK(session->Close());
 }
 
 void ConcurrentSessions(const Options& opts) {
   // Spawn N threads for N concurrent sessions.
   const int N = opts.num_concurrent_sessions;
+
+  // At the moment our Session implementation only allows
+  // one concurrently computing Session on GPU.
+  CHECK_EQ(1, N) << "Currently can only have one concurrent session.";
+
   thread::ThreadPool session_threads(Env::Default(), "trainer", N);
   for (int i = 0; i < N; ++i) {
     session_threads.Schedule(std::bind(&ConcurrentSteps, &opts, i));
@@ -155,7 +167,8 @@ namespace {
 
 bool ParseInt32Flag(tensorflow::StringPiece arg, tensorflow::StringPiece flag,
                     int32* dst) {
-  if (arg.Consume(flag) && arg.Consume("=")) {
+  if (tensorflow::str_util::ConsumePrefix(&arg, flag) &&
+      tensorflow::str_util::ConsumePrefix(&arg, "=")) {
     char extra;
     return (sscanf(arg.data(), "%d%c", dst, &extra) == 1);
   }
@@ -165,7 +178,7 @@ bool ParseInt32Flag(tensorflow::StringPiece arg, tensorflow::StringPiece flag,
 
 bool ParseBoolFlag(tensorflow::StringPiece arg, tensorflow::StringPiece flag,
                    bool* dst) {
-  if (arg.Consume(flag)) {
+  if (tensorflow::str_util::ConsumePrefix(&arg, flag)) {
     if (arg.empty()) {
       *dst = true;
       return true;
@@ -216,7 +229,7 @@ int main(int argc, char* argv[]) {
     argv[dst++] = f;
   }
   argv[dst++] = nullptr;
-  argc = unknown_flags.size() + 1;
+  argc = static_cast<int>(unknown_flags.size() + 1);
   tensorflow::port::InitMain(argv[0], &argc, &argv);
   tensorflow::example::ConcurrentSessions(opts);
 }

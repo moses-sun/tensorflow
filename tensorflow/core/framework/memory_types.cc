@@ -15,7 +15,10 @@ limitations under the License.
 
 #include "tensorflow/core/framework/memory_types.h"
 
+#include <utility>
+
 #include "tensorflow/core/framework/kernel_def.pb.h"
+#include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/types.h"
@@ -58,36 +61,14 @@ void MemoryTypesHelper(const NameRangeMap& name_map,
 }
 
 MemoryType MTypeFromDType(const DataType dtype) {
-  return (dtype == DT_INT32) ? HOST_MEMORY : DEVICE_MEMORY;
-}
-
-// Initialize the default memory types for type list arguments from the data
-// types. (The default can be overridden by an explicit HostMemory()
-// declaration.)
-Status SetTypeListMTypesFromDTypes(
-    const NameRangeMap& name_ranges,
-    const protobuf::RepeatedPtrField<OpDef::ArgDef>& args,
-    const DataTypeVector& dtypes, MemoryTypeVector* mtypes) {
-  for (const auto& a : args) {
-    if (!a.type_list_attr().empty()) {
-      auto it = name_ranges.find(a.name());
-      if (it == name_ranges.end()) {
-        return errors::InvalidArgument("Name range for argument ", a.name(),
-                                       " not found.");
-      }
-
-      for (int i = it->second.first; i < it->second.second; ++i) {
-        (*mtypes)[i] = MTypeFromDType(dtypes[i]);
-      }
-    }
-  }
-  return Status::OK();
+  return (dtype == DT_INT32 || DataTypeAlwaysOnHost(dtype)) ? HOST_MEMORY
+                                                            : DEVICE_MEMORY;
 }
 
 }  // namespace
 
 Status MemoryTypesForNode(const OpRegistryInterface* op_registry,
-                          DeviceType device_type, const NodeDef& ndef,
+                          const DeviceType& device_type, const NodeDef& ndef,
                           MemoryTypeVector* inp_mtypes,
                           MemoryTypeVector* out_mtypes) {
   // Look up the Op registered for this op name.
@@ -107,12 +88,13 @@ Status MemoryTypesForNode(const OpRegistryInterface* op_registry,
   inp_mtypes->clear();
   out_mtypes->clear();
 
-  if (!status.ok()) {
-    // When there is no kernel def for this op, we can only best-effort derive
-    // the memory type from the data type.  For now, we assume int32 is always
-    // on host memory and other types are always on device memory. We should
-    // do type inference over function body to derive the correct
-    // input/output memory types.
+  // For functions (which have no KernelDef) and their gradients, we can only
+  // best-effort derive the memory type from the data type. For now, we assume
+  // int32 is always on host memory and other types are always on device memory.
+  // TODO(zhifengc,phawkins): We should do type inference over function bodies
+  // to derive the correct input/output memory types. We should also split
+  // host-memory and non host-memory arguments into separate type lists.
+  if (!status.ok() || ndef.op() == "SymbolicGradient") {
     for (const auto& t : inp_dtypes) inp_mtypes->push_back(MTypeFromDType(t));
     for (const auto& t : out_dtypes) out_mtypes->push_back(MTypeFromDType(t));
     return Status::OK();
@@ -127,12 +109,6 @@ Status MemoryTypesForNode(const OpRegistryInterface* op_registry,
   inp_mtypes->resize(GetTotal(inp_names), DEVICE_MEMORY);
   out_mtypes->resize(GetTotal(out_names), DEVICE_MEMORY);
 
-  // For type list arguments, mark int32 arguments as host memory.
-  TF_RETURN_IF_ERROR(SetTypeListMTypesFromDTypes(inp_names, op_def->input_arg(),
-                                                 inp_dtypes, inp_mtypes));
-  TF_RETURN_IF_ERROR(SetTypeListMTypesFromDTypes(
-      out_names, op_def->output_arg(), out_dtypes, out_mtypes));
-
   // Fills in host memory types based on the kernel def.
   const auto& from_proto = kdef->host_memory_arg();
   std::vector<string> host_memory_args(from_proto.begin(), from_proto.end());
@@ -142,6 +118,36 @@ Status MemoryTypesForNode(const OpRegistryInterface* op_registry,
     return errors::InvalidArgument(
         "HostMemory args '", str_util::Join(host_memory_args, "', '"),
         "' not found in OpDef: ", SummarizeOpDef(*op_def));
+  }
+  CHECK_LE(inp_mtypes->size(), inp_dtypes.size());
+  CHECK_LE(out_mtypes->size(), out_dtypes.size());
+
+  // Mark e.g. all resource and string types as host memory.
+  for (int i = 0; i < inp_mtypes->size(); ++i) {
+    if (DataTypeAlwaysOnHost(inp_dtypes[i])) {
+      (*inp_mtypes)[i] = HOST_MEMORY;
+    }
+  }
+  for (int i = 0; i < out_mtypes->size(); ++i) {
+    if (DataTypeAlwaysOnHost(out_dtypes[i])) {
+      (*out_mtypes)[i] = HOST_MEMORY;
+    }
+  }
+
+  std::vector<int32> hostmem_attr;
+  if (GetNodeAttr(ndef, "_input_hostmem", &hostmem_attr).ok()) {
+    for (int32 i : hostmem_attr) {
+      if (0 <= i && i < inp_mtypes->size()) {
+        (*inp_mtypes)[i] = HOST_MEMORY;
+      }
+    }
+  }
+  if (GetNodeAttr(ndef, "_output_hostmem", &hostmem_attr).ok()) {
+    for (int32 i : hostmem_attr) {
+      if (0 <= i && i < out_mtypes->size()) {
+        (*out_mtypes)[i] = HOST_MEMORY;
+      }
+    }
   }
 
   return Status::OK();

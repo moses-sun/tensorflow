@@ -17,6 +17,8 @@ limitations under the License.
 
 #define EIGEN_USE_THREADS
 
+#include <numeric>
+
 #include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
@@ -48,8 +50,9 @@ class SparseSoftmaxOp : public OpKernel {
                 errors::InvalidArgument(
                     "Input sp_indices should be a matrix but received shape: ",
                     indices_t->shape().DebugString()));
-    OP_REQUIRES(context, TensorShapeUtils::IsVector(values_t->shape()) &&
-                             TensorShapeUtils::IsVector(shape_t->shape()),
+    OP_REQUIRES(context,
+                TensorShapeUtils::IsVector(values_t->shape()) &&
+                    TensorShapeUtils::IsVector(shape_t->shape()),
                 errors::InvalidArgument(
                     "Inputs sp_values and sp_shape should be vectors "
                     "but received shapes: ",

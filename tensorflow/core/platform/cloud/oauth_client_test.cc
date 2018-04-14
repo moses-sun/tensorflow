@@ -20,8 +20,8 @@ limitations under the License.
 #include <openssl/pem.h>
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/io/path.h"
+#include "tensorflow/core/lib/strings/base64.h"
 #include "tensorflow/core/lib/strings/scanner.h"
-#include "tensorflow/core/platform/cloud/base64.h"
 #include "tensorflow/core/platform/cloud/http_request_fake.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/test.h"
@@ -160,12 +160,12 @@ TEST(OAuthClientTest, GetTokenFromServiceAccountJson) {
   ASSERT_EQ(1, EVP_DigestVerifyInit(md_ctx, nullptr, md, nullptr, key));
   ASSERT_EQ(1, EVP_DigestVerifyUpdate(md_ctx, header_dot_claim.c_str(),
                                       header_dot_claim.size()));
-  ASSERT_EQ(
-      1,
-      EVP_DigestVerifyFinal(
-          md_ctx, const_cast<unsigned char*>(
-                      reinterpret_cast<const unsigned char*>(signature.data())),
-          signature.size()));
+  ASSERT_EQ(1,
+            EVP_DigestVerifyFinal(
+                md_ctx,
+                const_cast<unsigned char*>(
+                    reinterpret_cast<const unsigned char*>(signature.data())),
+                signature.size()));
   EVP_MD_CTX_cleanup(md_ctx);
 
   // Free all the crypto-related resources.

@@ -39,12 +39,6 @@ using tensorflow::uint64;
 using std::string;
 #endif
 
-#if !defined(COMPILER_MSVC)
-#define ARRAYSIZE(a)              \
-    ((sizeof(a) / sizeof(*(a))) / \
-    static_cast<size_t>(!(sizeof(a) % sizeof(*(a)))))
-#endif
-
 using tensorflow::LinkerInitialized;
 using tensorflow::LINKER_INITIALIZED;
 
@@ -55,5 +49,7 @@ using tensorflow::LINKER_INITIALIZED;
 
 #define SE_DISALLOW_COPY_AND_ASSIGN TF_DISALLOW_COPY_AND_ASSIGN
 #define SE_MUST_USE_RESULT TF_MUST_USE_RESULT
+#define SE_PREDICT_TRUE TF_PREDICT_TRUE
+#define SE_PREDICT_FALSE TF_PREDICT_FALSE
 
 #endif  // TENSORFLOW_STREAM_EXECUTOR_PLATFORM_PORT_H_

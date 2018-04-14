@@ -1,5 +1,4 @@
 /* Copyright 2015 The TensorFlow Authors. All Rights Reserved.
-
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -21,8 +20,11 @@ limitations under the License.
 #include <stdlib.h>
 #include <algorithm>
 #include <cmath>
+#include <locale>
 #include <unordered_map>
 
+#include "tensorflow/core/lib/strings/str_util.h"
+#include "tensorflow/core/lib/strings/stringprintf.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/macros.h"
 #include "tensorflow/core/platform/types.h"
@@ -79,25 +81,24 @@ T locale_independent_strtonum(const char* str, const char** endptr) {
   // Set to result to what strto{f,d} functions would have returned. If the
   // number was outside the range, the stringstream sets the fail flag, but
   // returns the +/-max() value, whereas strto{f,d} functions return +/-INF.
-  bool real_fail = false;
   if (s.fail()) {
-    real_fail = true;
-    if (result == std::numeric_limits<T>::max()) {
+    if (result == std::numeric_limits<T>::max() ||
+        result == std::numeric_limits<T>::infinity()) {
       result = std::numeric_limits<T>::infinity();
-      real_fail = false;
-    } else if (result == -std::numeric_limits<T>::max()) {
+      s.clear(s.rdstate() & ~std::ios::failbit);
+    } else if (result == -std::numeric_limits<T>::max() ||
+               result == -std::numeric_limits<T>::infinity()) {
       result = -std::numeric_limits<T>::infinity();
-      real_fail = false;
+      s.clear(s.rdstate() & ~std::ios::failbit);
     }
   }
 
   if (endptr) {
     *endptr =
         str +
-        (real_fail
-             ? static_cast<std::iostream::pos_type>(0)
-             : (s.eof() ? static_cast<std::iostream::pos_type>(strlen(str))
-                        : s.tellg()));
+        (s.fail() ? static_cast<std::iostream::pos_type>(0)
+                  : (s.eof() ? static_cast<std::iostream::pos_type>(strlen(str))
+                             : s.tellg()));
   }
   return result;
 }
@@ -106,19 +107,22 @@ T locale_independent_strtonum(const char* str, const char** endptr) {
 
 namespace strings {
 
-char* FastInt32ToBufferLeft(int32 i, char* buffer) {
+size_t FastInt32ToBufferLeft(int32 i, char* buffer) {
   uint32 u = i;
+  size_t length = 0;
   if (i < 0) {
     *buffer++ = '-';
+    ++length;
     // We need to do the negation in modular (i.e., "unsigned")
     // arithmetic; MSVC++ apparently warns for plain "-u", so
     // we write the equivalent expression "0 - u" instead.
     u = 0 - u;
   }
-  return FastUInt32ToBufferLeft(u, buffer);
+  length += FastUInt32ToBufferLeft(u, buffer);
+  return length;
 }
 
-char* FastUInt32ToBufferLeft(uint32 i, char* buffer) {
+size_t FastUInt32ToBufferLeft(uint32 i, char* buffer) {
   char* start = buffer;
   do {
     *buffer++ = ((i % 10) + '0');
@@ -126,19 +130,22 @@ char* FastUInt32ToBufferLeft(uint32 i, char* buffer) {
   } while (i > 0);
   *buffer = 0;
   std::reverse(start, buffer);
-  return buffer;
+  return buffer - start;
 }
 
-char* FastInt64ToBufferLeft(int64 i, char* buffer) {
+size_t FastInt64ToBufferLeft(int64 i, char* buffer) {
   uint64 u = i;
+  size_t length = 0;
   if (i < 0) {
     *buffer++ = '-';
+    ++length;
     u = 0 - u;
   }
-  return FastUInt64ToBufferLeft(u, buffer);
+  length += FastUInt64ToBufferLeft(u, buffer);
+  return length;
 }
 
-char* FastUInt64ToBufferLeft(uint64 i, char* buffer) {
+size_t FastUInt64ToBufferLeft(uint64 i, char* buffer) {
   char* start = buffer;
   do {
     *buffer++ = ((i % 10) + '0');
@@ -146,19 +153,18 @@ char* FastUInt64ToBufferLeft(uint64 i, char* buffer) {
   } while (i > 0);
   *buffer = 0;
   std::reverse(start, buffer);
-  return buffer;
+  return buffer - start;
 }
 
 static const double kDoublePrecisionCheckMax = DBL_MAX / 1.000000000000001;
 
-char* DoubleToBuffer(double value, char* buffer) {
+size_t DoubleToBuffer(double value, char* buffer) {
   // DBL_DIG is 15 for IEEE-754 doubles, which are used on almost all
   // platforms these days.  Just in case some system exists where DBL_DIG
   // is significantly larger -- and risks overflowing our buffer -- we have
   // this assert.
   static_assert(DBL_DIG < 20, "DBL_DIG is too big");
 
-  bool full_precision_needed = true;
   if (std::abs(value) <= kDoublePrecisionCheckMax) {
     int snprintf_result =
         snprintf(buffer, kFastToBufferSize, "%.*g", DBL_DIG, value);
@@ -167,18 +173,20 @@ char* DoubleToBuffer(double value, char* buffer) {
     // larger than the precision we asked for.
     DCHECK(snprintf_result > 0 && snprintf_result < kFastToBufferSize);
 
-    full_precision_needed =
-        locale_independent_strtonum<double>(buffer, NULL) != value;
+    if (locale_independent_strtonum<double>(buffer, nullptr) == value) {
+      // Round-tripping the string to double works; we're done.
+      return snprintf_result;
+    }
+    // else: full precision formatting needed. Fall through.
   }
 
-  if (full_precision_needed) {
-    int snprintf_result =
-        snprintf(buffer, kFastToBufferSize, "%.*g", DBL_DIG + 2, value);
+  int snprintf_result =
+      snprintf(buffer, kFastToBufferSize, "%.*g", DBL_DIG + 2, value);
 
-    // Should never overflow; see above.
-    DCHECK(snprintf_result > 0 && snprintf_result < kFastToBufferSize);
-  }
-  return buffer;
+  // Should never overflow; see above.
+  DCHECK(snprintf_result > 0 && snprintf_result < kFastToBufferSize);
+
+  return snprintf_result;
 }
 
 namespace {
@@ -196,7 +204,7 @@ bool safe_strto64(StringPiece str, int64* value) {
 
   int64 vlimit = kint64max;
   int sign = 1;
-  if (str.Consume("-")) {
+  if (str_util::ConsumePrefix(&str, "-")) {
     sign = -1;
     // Different limit for positive and negative integers.
     vlimit = kint64min;
@@ -236,7 +244,7 @@ bool safe_strtou64(StringPiece str, uint64* value) {
   SkipSpaces(&str);
   if (!isdigit(SafeFirstChar(str))) return false;
 
-  int64 result = 0;
+  uint64 result = 0;
   do {
     int digit = SafeFirstChar(str) - '0';
     if ((kuint64max - digit) / 10 < result) {
@@ -258,7 +266,7 @@ bool safe_strto32(StringPiece str, int32* value) {
 
   int64 vmax = kint32max;
   int sign = 1;
-  if (str.Consume("-")) {
+  if (str_util::ConsumePrefix(&str, "-")) {
     sign = -1;
     // Different max for positive and negative integers.
     ++vmax;
@@ -279,7 +287,7 @@ bool safe_strto32(StringPiece str, int32* value) {
 
   if (!str.empty()) return false;
 
-  *value = result * sign;
+  *value = static_cast<int32>(result * sign);
   return true;
 }
 
@@ -299,7 +307,7 @@ bool safe_strtou32(StringPiece str, uint32* value) {
   SkipSpaces(&str);
   if (!str.empty()) return false;
 
-  *value = result;
+  *value = static_cast<uint32>(result);
   return true;
 }
 
@@ -325,7 +333,7 @@ bool safe_strtod(const char* str, double* value) {
   return *str != '\0' && *endptr == '\0';
 }
 
-char* FloatToBuffer(float value, char* buffer) {
+size_t FloatToBuffer(float value, char* buffer) {
   // FLT_DIG is 6 for IEEE-754 floats, which are used on almost all
   // platforms these days.  Just in case some system exists where FLT_DIG
   // is significantly larger -- and risks overflowing our buffer -- we have
@@ -342,12 +350,12 @@ char* FloatToBuffer(float value, char* buffer) {
   float parsed_value;
   if (!safe_strtof(buffer, &parsed_value) || parsed_value != value) {
     snprintf_result =
-        snprintf(buffer, kFastToBufferSize, "%.*g", FLT_DIG + 2, value);
+        snprintf(buffer, kFastToBufferSize, "%.*g", FLT_DIG + 3, value);
 
     // Should never overflow; see above.
     DCHECK(snprintf_result > 0 && snprintf_result < kFastToBufferSize);
   }
-  return buffer;
+  return snprintf_result;
 }
 
 string FpToString(Fprint fp) {
@@ -399,6 +407,30 @@ bool HexStringToUint64(const StringPiece& s, uint64* result) {
   return true;
 }
 
+string HumanReadableNum(int64 value) {
+  string s;
+  if (value < 0) {
+    s += "-";
+    value = -value;
+  }
+  if (value < 1000) {
+    Appendf(&s, "%lld", value);
+  } else if (value >= static_cast<int64>(1e15)) {
+    // Number bigger than 1E15; use that notation.
+    Appendf(&s, "%0.3G", static_cast<double>(value));
+  } else {
+    static const char units[] = "kMBT";
+    const char* unit = units;
+    while (value >= static_cast<int64>(1000000)) {
+      value /= static_cast<int64>(1000);
+      ++unit;
+      CHECK(unit < units + TF_ARRAYSIZE(units));
+    }
+    Appendf(&s, "%.2f%c", value / 1000.0, *unit);
+  }
+  return s;
+}
+
 string HumanReadableNumBytes(int64 num_bytes) {
   if (num_bytes == kint64min) {
     // Special case for number with not representable negation.
@@ -432,6 +464,59 @@ string HumanReadableNumBytes(int64 num_bytes) {
   snprintf(buf, sizeof(buf), ((*unit == 'K') ? "%s%.1f%ciB" : "%s%.2f%ciB"),
            neg_str, num_bytes / 1024.0, *unit);
   return string(buf);
+}
+
+string HumanReadableElapsedTime(double seconds) {
+  string human_readable;
+
+  if (seconds < 0) {
+    human_readable = "-";
+    seconds = -seconds;
+  }
+
+  // Start with us and keep going up to years.
+  // The comparisons must account for rounding to prevent the format breaking
+  // the tested condition and returning, e.g., "1e+03 us" instead of "1 ms".
+  const double microseconds = seconds * 1.0e6;
+  if (microseconds < 999.5) {
+    strings::Appendf(&human_readable, "%0.3g us", microseconds);
+    return human_readable;
+  }
+  double milliseconds = seconds * 1e3;
+  if (milliseconds >= .995 && milliseconds < 1) {
+    // Round half to even in Appendf would convert this to 0.999 ms.
+    milliseconds = 1.0;
+  }
+  if (milliseconds < 999.5) {
+    strings::Appendf(&human_readable, "%0.3g ms", milliseconds);
+    return human_readable;
+  }
+  if (seconds < 60.0) {
+    strings::Appendf(&human_readable, "%0.3g s", seconds);
+    return human_readable;
+  }
+  seconds /= 60.0;
+  if (seconds < 60.0) {
+    strings::Appendf(&human_readable, "%0.3g min", seconds);
+    return human_readable;
+  }
+  seconds /= 60.0;
+  if (seconds < 24.0) {
+    strings::Appendf(&human_readable, "%0.3g h", seconds);
+    return human_readable;
+  }
+  seconds /= 24.0;
+  if (seconds < 30.0) {
+    strings::Appendf(&human_readable, "%0.3g days", seconds);
+    return human_readable;
+  }
+  if (seconds < 365.2425) {
+    strings::Appendf(&human_readable, "%0.3g months", seconds / 30.436875);
+    return human_readable;
+  }
+  seconds /= 365.2425;
+  strings::Appendf(&human_readable, "%0.3g years", seconds);
+  return human_readable;
 }
 
 }  // namespace strings

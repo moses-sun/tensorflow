@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "tensorflow/core/framework/allocator.h"
 
+#include "tensorflow/core/framework/allocator_registry.h"
 #include "tensorflow/core/framework/log_memory.h"
 #include "tensorflow/core/framework/tracking_allocator.h"
 #include "tensorflow/core/lib/strings/stringprintf.h"
@@ -47,10 +48,38 @@ constexpr size_t Allocator::kAllocatorAlignment;
 
 Allocator::~Allocator() {}
 
+void RunResourceCtor(ResourceHandle* p, size_t n) {
+  for (size_t i = 0; i < n; ++p, ++i) new (p) ResourceHandle();
+}
+
+void RunResourceDtor(ResourceHandle* p, size_t n) {
+  for (size_t i = 0; i < n; ++p, ++i) p->~ResourceHandle();
+}
+
 // If true, cpu allocator collects more stats.
 static bool cpu_allocator_collect_stats = false;
 // If true, cpu allocator collects full stats.
 static bool cpu_allocator_collect_full_stats = false;
+
+// Individual allocations large than this amount will trigger a warning.
+static const double kLargeAllocationWarningThreshold = 0.1;
+
+// If cpu_allocator_collect_stats is true, warn when the total allocated memory
+// exceeds this threshold.
+static const double kTotalAllocationWarningThreshold = 0.5;
+
+// Cache first invocation to port::AvailableRam, as it can be expensive.
+static int64_t LargeAllocationWarningBytes() {
+  static int64_t value = static_cast<int64>(port::AvailableRam() *
+                                            kLargeAllocationWarningThreshold);
+  return value;
+}
+
+static int64_t TotalAllocationWarningBytes() {
+  static int64_t value = static_cast<int64>(port::AvailableRam() *
+                                            kTotalAllocationWarningThreshold);
+  return value;
+}
 
 void EnableCPUAllocatorStats(bool enable) {
   cpu_allocator_collect_stats = enable;
@@ -61,14 +90,20 @@ void EnableCPUAllocatorFullStats(bool enable) {
 
 class CPUAllocator : public Allocator {
  public:
-  CPUAllocator() {}
+  CPUAllocator() : total_allocation_warning_triggered_(false) {}
 
   ~CPUAllocator() override {}
 
   string Name() override { return "cpu"; }
 
   void* AllocateRaw(size_t alignment, size_t num_bytes) override {
-    void* p = port::aligned_malloc(num_bytes, alignment);
+    if (num_bytes > LargeAllocationWarningBytes()) {
+      LOG(WARNING) << "Allocation of " << num_bytes << " exceeds "
+                   << 100 * kLargeAllocationWarningThreshold
+                   << "% of system memory.";
+    }
+
+    void* p = port::AlignedMalloc(num_bytes, alignment);
     if (cpu_allocator_collect_stats) {
       const std::size_t alloc_size = port::MallocExtension_GetAllocatedSize(p);
       mutex_lock l(mu_);
@@ -78,6 +113,14 @@ class CPUAllocator : public Allocator {
           std::max<int64>(stats_.max_bytes_in_use, stats_.bytes_in_use);
       stats_.max_alloc_size =
           std::max<int64>(stats_.max_alloc_size, alloc_size);
+
+      if (stats_.bytes_in_use > TotalAllocationWarningBytes() &&
+          !total_allocation_warning_triggered_) {
+        LOG(WARNING) << "Total allocated memory " << stats_.bytes_in_use
+                     << "exceeds " << 100 * kTotalAllocationWarningThreshold
+                     << "% of system memory";
+        total_allocation_warning_triggered_ = true;
+      }
     }
     return p;
   }
@@ -89,7 +132,7 @@ class CPUAllocator : public Allocator {
       mutex_lock l(mu_);
       stats_.bytes_in_use -= alloc_size;
     }
-    port::aligned_free(ptr);
+    port::AlignedFree(ptr);
   }
 
   void GetStats(AllocatorStats* stats) override {
@@ -97,30 +140,33 @@ class CPUAllocator : public Allocator {
     *stats = stats_;
   }
 
-  size_t AllocatedSizeSlow(void* ptr) override {
+  void ClearStats() override {
+    mutex_lock l(mu_);
+    stats_.num_allocs = 0;
+    stats_.max_bytes_in_use = stats_.bytes_in_use;
+    stats_.max_alloc_size = 0;
+  }
+
+  size_t AllocatedSizeSlow(const void* ptr) override {
     return port::MallocExtension_GetAllocatedSize(ptr);
   }
 
  private:
   mutex mu_;
   AllocatorStats stats_ GUARDED_BY(mu_);
+  bool total_allocation_warning_triggered_ GUARDED_BY(mu_);
 
   TF_DISALLOW_COPY_AND_ASSIGN(CPUAllocator);
 };
 
-namespace {
-Allocator* MakeCpuAllocator() {
-  Allocator* allocator = new CPUAllocator;
-  if (cpu_allocator_collect_full_stats || LogMemory::IsEnabled()) {
-    allocator = new TrackingAllocator(allocator, true);
-  }
-  return allocator;
-}
-}  // namespace
-
 Allocator* cpu_allocator() {
-  static Allocator* cpu_alloc = MakeCpuAllocator();
+  static Allocator* cpu_alloc = AllocatorRegistry::Global()->GetAllocator();
+  if (cpu_allocator_collect_full_stats && !cpu_alloc->TracksAllocationSizes()) {
+    cpu_alloc = new TrackingAllocator(cpu_alloc, true);
+  }
   return cpu_alloc;
 }
+
+REGISTER_MEM_ALLOCATOR("DefaultCPUAllocator", 100, CPUAllocator);
 
 }  // namespace tensorflow

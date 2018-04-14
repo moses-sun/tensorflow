@@ -29,14 +29,13 @@ using tensorflow::str_util::Split;
 // Returns a copy of the input string 'str' with the given 'suffix'
 // removed. If the suffix doesn't match, returns a copy of the original string.
 inline string StripSuffixString(port::StringPiece str, port::StringPiece suffix) {
-  if (str.ends_with(suffix)) {
+  if (tensorflow::str_util::EndsWith(str, suffix)) {
     str.remove_suffix(suffix.size());
   }
   return str.ToString();
 }
 
 using tensorflow::str_util::Lowercase;
-using tensorflow::str_util::Uppercase;
 
 }  // namespace port
 }  // namespace gputools

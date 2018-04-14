@@ -21,10 +21,7 @@ limitations under the License.
 // computations across different threads if necessary.
 #include <algorithm>
 
-#define EIGEN_USE_THREADS
-
 #include "third_party/eigen3/Eigen/Core"
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -39,11 +36,11 @@ limitations under the License.
 namespace tensorflow {
 
 // Base class for linear algebra operators.
-template <typename Scalar, bool SupportsBatchOperationT>
+template <typename Scalar>
 class LinearAlgebraOp : public OpKernel {
  public:
   explicit LinearAlgebraOp(OpKernelConstruction* context) : OpKernel(context) {}
-  ~LinearAlgebraOp() override {}
+
   void Compute(OpKernelContext* context) override;
 
  protected:
@@ -80,19 +77,26 @@ class LinearAlgebraOp : public OpKernel {
                                    const TensorShapes& input_matrix_shapes);
 
   // Returns the output shapes of each individual matrix operation. Output
-  // matrices shapes must be rank 0, 1, or 2.  Scalar outputs are rank 0.
-  // For many ops the output dimensions are the same as the input dimensions,
+  // matrices shapes must be rank 0, 1, or 2. Scalar outputs are rank 0.
+  //
+  // The derived class may return a number of shapes (N) less than
+  // context->num_outputs() (M) to indicate that a only leading subset of
+  // the outputs will be populated. In this case, a dummy scalar tensor with
+  // value zero will be return for the last M-N outputs.
+  //
+  // For many ops, the output dimensions are the same as the input dimensions,
   // so we provide that as a default implementation for convenience.
   virtual TensorShapes GetOutputMatrixShapes(
       const TensorShapes& input_matrix_shapes) const {
     return input_matrix_shapes;
   }
 
-  // Returns the cost per matrix operation. Cost per unit is assumed to be
-  // roughly 1ns, based on comments in core/util/work_sharder.cc.
-  // Many linear algebra ops take roughly max(m,n) * min(m,n)^2, where the first
-  // input matrix is m-by-n. We provide that as a default implementation for
-  // convenience.
+  // Returns the cost per matrix operation. This is used to determine the
+  // number of threads to use for parallelizing calls to ComputeMatrix in
+  // batch mode. Cost per unit is assumed to be roughly 1ns, based on comments
+  // in core/util/work_sharder.cc. Many linear algebra ops take roughly max(m,n)
+  // * min(m,n)^2, where the first input matrix is m-by-n. We provide that as a
+  // default implementation for convenience.
   virtual int64 GetCostPerUnit(const TensorShapes& input_matrix_shapes) const {
     double m = static_cast<double>(input_matrix_shapes[0].dim_size(0));
     double n = static_cast<double>(input_matrix_shapes[0].dim_size(1));
@@ -101,27 +105,33 @@ class LinearAlgebraOp : public OpKernel {
                                                   : static_cast<int64>(cost);
   }
 
+  // Returns true if it is safe to forward (alias) input to output buffer
+  // and expect the kernel to perform the computation inplace.
+  virtual bool EnableInputForwarding() const { return true; }
+
   using Matrix =
       Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
   using ConstMatrixMap = Eigen::Map<const Matrix>;
   using MatrixMap = Eigen::Map<Matrix>;
   using ConstMatrixMaps = gtl::InlinedVector<ConstMatrixMap, 4>;
   using MatrixMaps = gtl::InlinedVector<MatrixMap, 4>;
+  using RealScalar = typename Eigen::NumTraits<Scalar>::Real;
 
   // Performs a single matrix computation given input matrices, and
   // stores the result in outputs. For batch operations, this will be called
   // repeatedly for a single call to Compute() when multiple matrices exist in
-  // input Tensors with rank > 2.
+  // input Tensors with rank > 2. In this case the calls to ComputeMatrix are
+  // parallelized. The number of threads used is determined by a cost model from
+  // the value returned by GetCostPerUnit().
   virtual void ComputeMatrix(OpKernelContext* context,
                              const ConstMatrixMaps& inputs,
                              MatrixMaps* outputs) = 0;
 
  private:
-  using TensorInputs = gtl::InlinedVector<Tensor, 4>;
+  using TensorInputs = gtl::InlinedVector<const Tensor*, 4>;
   using TensorOutputs = gtl::InlinedVector<Tensor*, 4>;
-
-  // This function maps slices (matrices) of the input and output tensors using
-  // Eigen::Map and calls ComputeMatrix implemented in terms of the
+  // This function maps 2-d slices (matrices) of the input and output tensors
+  // using Eigen::Map and calls ComputeMatrix implemented in terms of the
   // Eigen::MatrixBase API by the derived class.
   //
   // The 'matrix_index' parameter specifies the index of the matrix to be used
@@ -142,19 +152,46 @@ class LinearAlgebraOp : public OpKernel {
                           const TensorShapes& input_matrix_shapes,
                           const TensorOutputs& outputs,
                           const TensorShapes& output_matrix_shapes);
+
+  void AnalyzeInputs(OpKernelContext* context, TensorInputs* inputs,
+                     TensorShapes* input_matrix_shapes,
+                     TensorShape* batch_shape);
+
+  void PrepareOutputs(OpKernelContext* context,
+                      const TensorShapes& input_matrix_shapes,
+                      const TensorShape& batch_shape, TensorOutputs* outputs,
+                      TensorShapes* output_matrix_shapes);
 };
 
-// Declare that LinearAlgebraOp is explicitly instantiated in
-// linalg_ops_common.cc for float and double.
-extern template class LinearAlgebraOp<float, false>;
-extern template class LinearAlgebraOp<float, true>;
-extern template class LinearAlgebraOp<double, false>;
-extern template class LinearAlgebraOp<double, true>;
+// Declare LinearAlgebraOp, which is explicitly instantiated in
+// linalg_ops_common.cc for float, double, complex64, and complex128.
+extern template class LinearAlgebraOp<float>;
+extern template class LinearAlgebraOp<double>;
+extern template class LinearAlgebraOp<complex64>;
+extern template class LinearAlgebraOp<complex128>;
 
 }  // namespace tensorflow
 
-#define REGISTER_LINALG_OP(OpName, OpClass, Scalar) \
-  REGISTER_KERNEL_BUILDER(                          \
+#define INHERIT_LINALG_TYPEDEFS(Scalar)                       \
+  typedef LinearAlgebraOp<Scalar> Base;                       \
+  using RealScalar = typename Eigen::NumTraits<Scalar>::Real; \
+  using Matrix = typename Base::Matrix;                       \
+  using MatrixMap = typename Base::MatrixMap;                 \
+  using MatrixMaps = typename Base::MatrixMaps;               \
+  using ConstMatrixMap = typename Base::ConstMatrixMap;       \
+  using ConstMatrixMaps = typename Base::ConstMatrixMaps;     \
+  using TensorShapes = typename Base::TensorShapes;
+
+#define REGISTER_LINALG_OP_CPU(OpName, OpClass, Scalar) \
+  REGISTER_KERNEL_BUILDER(                              \
       Name(OpName).Device(DEVICE_CPU).TypeConstraint<Scalar>("T"), OpClass)
+
+#define REGISTER_LINALG_OP_GPU(OpName, OpClass, Scalar) \
+  REGISTER_KERNEL_BUILDER(                              \
+      Name(OpName).Device(DEVICE_GPU).TypeConstraint<Scalar>("T"), OpClass)
+
+// Deprecated, use one of the device-specific macros above.
+#define REGISTER_LINALG_OP(OpName, OpClass, Scalar) \
+  REGISTER_LINALG_OP_CPU(OpName, OpClass, Scalar)
 
 #endif  // TENSORFLOW_KERNELS_LINALG_OPS_COMMON_H_

@@ -13,26 +13,29 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/node_def_builder.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/shape_inference_testutil.h"
+#include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/test.h"
 
 namespace tensorflow {
 
 TEST(CandidateSamplerOpsTest, CandidateSampler_ShapeFn) {
   for (const char* op_name : {
-           "AllCandidateSampler", "FixedUnigramCandidateSampler",
-           "LearnedUnigramCandidateSampler", "LogUniformCandidateSampler",
-           "ThreadUnsafeUnigramCandidateSampler", "UniformCandidateSampler",
+           "AllCandidateSampler",
+           "FixedUnigramCandidateSampler",
+           "LearnedUnigramCandidateSampler",
+           "LogUniformCandidateSampler",
+           "ThreadUnsafeUnigramCandidateSampler",
+           "UniformCandidateSampler",
        }) {
     ShapeInferenceTestOp op(op_name);
-    TF_CHECK_OK(NodeDefBuilder("test", op.name)
-                    .Input({"a", 0, DT_INT64})
-                    .Attr("num_sampled", 5)
-                    .Attr("num_true", 10)
-                    .Finalize(&op.node_def));
+    TF_ASSERT_OK(NodeDefBuilder("test", op.name)
+                     .Input({"a", 0, DT_INT64})
+                     .Attr("num_sampled", 5)
+                     .Attr("num_true", 10)
+                     .Finalize(&op.node_def));
 
     // num_sampled = 5, num_true = 10.
     INFER_OK(op, "?", "[5];[?,10];[5]");
@@ -48,11 +51,11 @@ TEST(CandidateSamplerOpsTest, CandidateSampler_ShapeFn) {
 
 TEST(CandidateSamplerOpsTest, ComputeAccidentalHits_ShapeFn) {
   ShapeInferenceTestOp op("ComputeAccidentalHits");
-  TF_CHECK_OK(NodeDefBuilder("test", op.name)
-                  .Input({"a", 0, DT_INT64})
-                  .Input({"b", 0, DT_INT64})
-                  .Attr("num_true", 10)
-                  .Finalize(&op.node_def));
+  TF_ASSERT_OK(NodeDefBuilder("test", op.name)
+                   .Input({"a", 0, DT_INT64})
+                   .Input({"b", 0, DT_INT64})
+                   .Attr("num_true", 10)
+                   .Finalize(&op.node_def));
 
   // output is always 3 [?] vectors.
   INFER_OK(op, "?;?", "[?];[?];[?]");

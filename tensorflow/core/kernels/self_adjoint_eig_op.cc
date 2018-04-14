@@ -22,19 +22,16 @@ limitations under the License.
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/kernels/linalg_ops_common.h"
 #include "tensorflow/core/lib/core/errors.h"
+#include "tensorflow/core/platform/denormal.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/types.h"
 
-// TODO(rmlarsen): Change this op to return the eigenvalues and eigenvectors in
-// separate output tensors.
-
 namespace tensorflow {
 
-template <class Scalar, bool SupportsBatchOperation>
-class SelfAdjointEigOp
-    : public LinearAlgebraOp<Scalar, SupportsBatchOperation> {
+template <class Scalar>
+class SelfAdjointEigOp : public LinearAlgebraOp<Scalar> {
  public:
-  typedef LinearAlgebraOp<Scalar, SupportsBatchOperation> Base;
+  typedef LinearAlgebraOp<Scalar> Base;
 
   explicit SelfAdjointEigOp(OpKernelConstruction* context) : Base(context) {}
 
@@ -59,6 +56,9 @@ class SelfAdjointEigOp
       return;
     }
 
+    // This algorithm relies on denormals, so switch them back on locally.
+    port::ScopedDontFlushDenormal dont_flush_denormals;
+
     Eigen::SelfAdjointEigenSolver<
         Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
         es(inputs[0]);
@@ -71,10 +71,8 @@ class SelfAdjointEigOp
   }
 };
 
-REGISTER_LINALG_OP("SelfAdjointEig", (SelfAdjointEigOp<float, false>), float);
-REGISTER_LINALG_OP("SelfAdjointEig", (SelfAdjointEigOp<double, false>), double);
-REGISTER_LINALG_OP("BatchSelfAdjointEig", (SelfAdjointEigOp<float, true>),
-                   float);
-REGISTER_LINALG_OP("BatchSelfAdjointEig", (SelfAdjointEigOp<double, true>),
-                   double);
+REGISTER_LINALG_OP("SelfAdjointEig", (SelfAdjointEigOp<float>), float);
+REGISTER_LINALG_OP("SelfAdjointEig", (SelfAdjointEigOp<double>), double);
+REGISTER_LINALG_OP("BatchSelfAdjointEig", (SelfAdjointEigOp<float>), float);
+REGISTER_LINALG_OP("BatchSelfAdjointEig", (SelfAdjointEigOp<double>), double);
 }  // namespace tensorflow

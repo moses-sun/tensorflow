@@ -13,8 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef THIRD_PARTY_TENSORFLOW_CC_OPS_CONST_OP_H_
-#define THIRD_PARTY_TENSORFLOW_CC_OPS_CONST_OP_H_
+#ifndef TENSORFLOW_CC_OPS_CONST_OP_H_
+#define TENSORFLOW_CC_OPS_CONST_OP_H_
 
 #include "tensorflow/cc/framework/ops.h"
 #include "tensorflow/cc/framework/scope.h"
@@ -23,24 +23,44 @@ limitations under the License.
 namespace tensorflow {
 namespace ops {
 
+/// @defgroup const_op Const Op
+/// @{
+
 Output Const(const Scope& scope, const Input::Initializer& val);
+
+Output ConstFromProto(const Scope& scope, const TensorProto& proto);
+
+NodeBuilder::NodeOut AsNodeOut(const Scope& scope, const Input& inp);
 
 template <typename T>
 Output Const(const Scope& scope, const Input::Initializer& val) {
+  auto orig_const_output = Const(scope, val);
   if (!scope.ok()) return Output();
-  if (!val.status.ok()) {
-    scope.UpdateStatus(val.status);
-    return Output();
-  }
+
   typedef typename Input::Initializer::RealType<T>::type DstT;
-  if (val.tensor.NumElements() > 0) {
-    // TODO(keveman): Implement the in-situ cast.
-    scope.UpdateStatus(errors::Unimplemented(
-        "Explict cast of a non-empty tensor not implemented yet"));
-    return Output();
+
+  if (val.tensor.dtype() == DataTypeToEnum<DstT>::v()) {
+    return orig_const_output;
   }
-  Tensor t(DataTypeToEnum<DstT>::v(), val.tensor.shape());
-  return Const(scope, Input::Initializer(t));
+  if (val.tensor.NumElements() == 0) {
+    Tensor t(DataTypeToEnum<DstT>::v(), val.tensor.shape());
+    return Const(scope, Input::Initializer(t));
+  }
+
+  // TODO(keveman): Refactor Cast op's kernel implementation such that the code
+  // can be directly called here instead of adding the Cast op to the graph.
+  auto orig_const = AsNodeOut(scope, orig_const_output);
+  const auto cast_op_name = scope.GetUniqueNameForOp("Cast");
+
+  auto cast_builder = NodeBuilder(cast_op_name, "Cast")
+                          .Input(orig_const)
+                          .Attr("DstT", DataTypeToEnum<DstT>::v());
+  scope.UpdateBuilder(&cast_builder);
+  Node* ret;
+  scope.UpdateStatus(cast_builder.Finalize(scope.graph(), &ret));
+  if (!scope.ok()) return Output();
+  scope.UpdateStatus(scope.DoShapeInference(ret));
+  return Output(ret, 0);
 }
 
 template <typename T>
@@ -54,12 +74,12 @@ Output Const(const Scope& scope, const std::initializer_list<T>& v,
   return Const(scope, Input::Initializer(v, shape));
 }
 
-NodeBuilder::NodeOut AsNodeOut(const Scope& scope, const Input& inp);
-
 std::vector<NodeBuilder::NodeOut> AsNodeOutList(const Scope& scope,
                                                 const InputList& inp);
+
+/// }@
 
 }  // namespace ops
 }  // namespace tensorflow
 
-#endif  // THIRD_PARTY_TENSORFLOW_CC_OPS_CONST_OP_H_
+#endif  // TENSORFLOW_CC_OPS_CONST_OP_H_

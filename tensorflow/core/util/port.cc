@@ -16,7 +16,7 @@ limitations under the License.
 #include "tensorflow/core/util/port.h"
 
 #if GOOGLE_CUDA
-#include "third_party/gpus/cuda/include/cuda.h"
+#include "cuda/include/cuda.h"
 #endif
 
 namespace tensorflow {
@@ -39,4 +39,11 @@ bool CudaSupportsHalfMatMulAndConv() {
 #endif
 }
 
+bool IsMklEnabled() {
+#ifdef INTEL_MKL
+  return true;
+#else
+  return false;
+#endif
+}
 }  // end namespace tensorflow

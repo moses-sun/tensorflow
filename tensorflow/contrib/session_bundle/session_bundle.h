@@ -1,4 +1,4 @@
-/* Copyright 2016 Google Inc. All Rights Reserved.
+/* Copyright 2016 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,8 +15,8 @@ limitations under the License.
 
 // Low-level functionality for setting up a inference Session.
 
-#ifndef THIRD_PARTY_TENSORFLOW_CONTRIB_SESSION_BUNDLE_SESSION_BUNDLE_H_
-#define THIRD_PARTY_TENSORFLOW_CONTRIB_SESSION_BUNDLE_SESSION_BUNDLE_H_
+#ifndef TENSORFLOW_CONTRIB_SESSION_BUNDLE_SESSION_BUNDLE_H_
+#define TENSORFLOW_CONTRIB_SESSION_BUNDLE_SESSION_BUNDLE_H_
 
 #include <memory>
 
@@ -45,13 +45,32 @@ const char kGraphKey[] = "serving_graph";
 struct SessionBundle {
   std::unique_ptr<Session> session;
   MetaGraphDef meta_graph_def;
+
+  // A TensorFlow Session does not Close itself on destruction. To avoid
+  // resource leaks, we explicitly call Close on Sessions that we create.
+  ~SessionBundle() {
+    if (session) {
+      session->Close().IgnoreError();
+    }
+  }
+
+  SessionBundle(SessionBundle&&) = default;
+  SessionBundle() = default;
 };
 
-// Loads a manifest and initialized session using the output of an Exporter
-// using the format defined at go/tf-exporter.
+// Loads a manifest and initialized session using the output of an Exporter.
 Status LoadSessionBundleFromPath(const SessionOptions& options,
                                  const StringPiece export_dir,
                                  SessionBundle* bundle);
+
+// Similar to the LoadSessionBundleFromPath(), but also allows the session run
+// invocations for the restore and init ops to be configured with
+// tensorflow::RunOptions.
+//
+// This method is EXPERIMENTAL and may change or be removed.
+Status LoadSessionBundleFromPathUsingRunOptions(
+    const SessionOptions& session_options, const RunOptions& run_options,
+    const StringPiece export_dir, SessionBundle* bundle);
 
 // Sanity checks whether the directory looks like an export directory. Note that
 // we don't try to load any data in this method.
@@ -63,4 +82,4 @@ bool IsPossibleExportDirectory(const StringPiece export_dir);
 }  // namespace serving
 }  // namespace tensorflow
 
-#endif  // THIRD_PARTY_TENSORFLOW_CONTRIB_SESSION_BUNDLE_SESSION_BUNDLE_H_
+#endif  // TENSORFLOW_CONTRIB_SESSION_BUNDLE_SESSION_BUNDLE_H_
